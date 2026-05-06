@@ -37,7 +37,6 @@ The project has three main components:
 ├── client_selection.py         # Per-round client selection policies
 │
 ├── dp_contingency_audit.py     # Standalone DP privacy audit (LRT)
-├── dp_bayesian_audit.py        # Stronger Bayesian audit (prior-informed)
 │
 └── requirements.txt
 ```
@@ -100,20 +99,6 @@ The server releases one noisy contingency table per feature per client, calibrat
 $$\sigma = \frac{\Delta f \cdot \sqrt{2 \ln(1.25/\delta)}}{\varepsilon}$$
 
 The audit confirms that at $\varepsilon_1 = 1.0$ the LRT membership inference attack is indistinguishable from random guessing (AUC $\approx 0.5$, TPR@1%FPR $\approx 1\%$) across all four ACS tasks and 50 US states.
-
----
-
-## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@article{yourpaper2026,
-  title   = {Distributed Data Valuation for Fair and Private Federated Learning},
-  author  = {Your Name et al.},
-  year    = {2026}
-}
-```
 
 ---
 

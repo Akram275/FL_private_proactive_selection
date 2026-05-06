@@ -21,10 +21,13 @@ ENV/
 # Data — ACS downloads are auto-fetched by folktables, do not commit
 data/
 
-# Results — large CSV/JSON run outputs, do not commit
-results/
-Convergence/
-Convergence2/
+# Track convergence logs and selected results artifacts.
+# Keep other large result dumps ignored by default.
+results/*
+!results/best_federations.csv
+!results/best_federations2.csv
+!results/dp_audit/
+!results/dp_audit/**
 
 # Shapefiles (optional map assets)
 *.dbf
