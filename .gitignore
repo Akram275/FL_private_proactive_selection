@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data — ACS downloads are auto-fetched by folktables, do not commit
+data/
+
+# Results — large CSV/JSON run outputs, do not commit
+results/
+Convergence/
+Convergence2/
+
+# Shapefiles (optional map assets)
+*.dbf
+*.shp
+*.shx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
