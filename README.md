@@ -1,11 +1,10 @@
 # FL Private Proactive Selection
 
-**Choose Wisely and Privately:   Proactive Client Selection for 
-  Fair and Efficient Federated Learning.**
+**Federated learning with privacy-aware, MI-driven client selection using differential privacy.**
 
 This repository contains the full pipeline accompanying the paper:
 
-> *Distributed Data Valuation for Fair and Private Federated Learning*
+> *Choose Wisely and Privately: Proactive Client Selection for Fair and Efficient Federated Learning*
 
 ---
 
