@@ -42,3 +42,15 @@ Thumbs.db
 
 # Logs
 *.log
+
+# CodeCarbon emissions tracking (embeds precise machine geolocation)
+emissions.csv
+
+# FL training convergence logs/plots -- large, machine-specific run output.
+# Keep only the placeholder markers that establish the results directory
+# structure (tracked separately, zero-byte files named after each task).
+Convergence2/**/*.csv
+Convergence2/**/*.png
+
+# PFL weight-calibration validation run output (same rationale as Convergence2).
+PFL_validation/

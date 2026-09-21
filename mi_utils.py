@@ -391,6 +391,7 @@ def aggregate_mi_components(local_components_list):
         'contingency_tables': dict(aggregated_tables) # Convert back to plain dict
     }
 
+
 # --- Global Calculation Function (CORRECTED for Broadcasting) ---
 def calculate_global_mi(aggregated_components, var_pair):
     """

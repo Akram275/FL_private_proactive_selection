@@ -139,12 +139,15 @@ class TaskConfig:
     # Features to use for MI calculation (after binning)
     mi_features: List[str] = field(default_factory=list)
     
-    # Default optimization weights (optimized via differential evolution)
+    # Default optimization weights: fixed, arbitrary constants (1.0 fairness,
+    # 1.0 utility) rather than values calibrated via FedAvg training + held-out
+    # fairness evaluation -- avoids that calibration step's unaccounted privacy
+    # exposure entirely, since nothing private is touched to set these.
     default_weights: Dict[str, float] = field(default_factory=lambda: {
-        'alpha_SN': 0.8889,  # Penalize Sensitive-NonSensitive correlation
-        'alpha_ST': 2.0,     # Penalize Sensitive-Target correlation
-        'beta_NN': 0.1111,   # Penalize NonSensitive-NonSensitive redundancy
-        'delta_NT': 1.3333   # Reward NonSensitive-Target utility
+        'alpha_SN': 1.0,  # Penalize Sensitive-NonSensitive correlation (fairness)
+        'alpha_ST': 1.0,  # Penalize Sensitive-Target correlation (fairness)
+        'beta_NN': 1.0,   # Penalize NonSensitive-NonSensitive redundancy (utility)
+        'delta_NT': 1.0   # Reward NonSensitive-Target utility (utility)
     })
     
     # Privacy parameters (RDP composition for all contingency tables)

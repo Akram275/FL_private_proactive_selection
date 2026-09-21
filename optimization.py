@@ -121,6 +121,151 @@ def calculate_loss(aggregated_components, ideal_targets, weights, sensitive_var,
     return loss
 
 
+# =============================================================================
+# Fast numpy-vector path for the SA swap loop
+# =============================================================================
+# calculate_loss/aggregate_mi_components operate on dict-of-labeled-pandas-
+# DataFrames, which costs ~70us of index-alignment overhead per pair per call
+# (~4ms per swap for a ~55-pair task). Below is a numpy-only mirror of that same math, used exclusively
+# inside simulated_annealing_selection's hot loop. It never touches
+# mi_utils.py's data-loading/DP pipeline, and the public pandas-based
+# aggregated_components format is reconstructed (via the untouched
+# aggregate_mi_components) once at the end for the function's return value,
+# so nothing outside the loop observes this representation.
+#
+# Correctness precondition relied on here: ideal_targets are always
+# {..., 0.0} everywhere this is called, so a pair with zero total count
+# contributes exactly 0 to the loss (mi=0, and weight*(0-0)=0 or
+# -weight*0=0) -- identical to calculate_loss's behavior of skipping a pair
+# absent from a given candidate's tables. If ideal_targets ever becomes
+# nonzero, this equivalence must be re-checked.
+
+def _relevant_pairs(sensitive_var, non_sensitive_vars):
+    all_relevant_vars = sorted(set([sensitive_var, 'label'] + list(non_sensitive_vars)))
+    pairs = []
+    for i, var1 in enumerate(all_relevant_vars):
+        for var2 in all_relevant_vars[i + 1:]:
+            pairs.append(tuple(sorted((var1, var2))))
+    return all_relevant_vars, pairs
+
+
+def build_fast_sa_state(all_local_components_map, client_ids, sensitive_var, non_sensitive_vars):
+    """
+    Build a flat-numpy-vector view of each client's contingency tables,
+    restricted to the pairs calculate_loss actually consults (pairs among
+    {sensitive_var, 'label'} + non_sensitive_vars). Every client's per-pair
+    table is reindexed once onto a shared canonical category order (the
+    union of categories any client observed for that pair), so later swap
+    updates are plain vector add/sub instead of pandas label-aligned ops.
+    """
+    _, pairs = _relevant_pairs(sensitive_var, non_sensitive_vars)
+
+    row_labels = {p: set() for p in pairs}
+    col_labels = {p: set() for p in pairs}
+    for cid in client_ids:
+        tables = all_local_components_map[cid].get('contingency_tables', {})
+        for p in pairs:
+            t = tables.get(p)
+            if t is not None and not t.empty:
+                row_labels[p].update(t.index)
+                col_labels[p].update(t.columns)
+    row_labels = {p: sorted(v) for p, v in row_labels.items()}
+    col_labels = {p: sorted(v) for p, v in col_labels.items()}
+
+    offsets = {}
+    offset = 0
+    for p in pairs:
+        shape = (len(row_labels[p]), len(col_labels[p]))
+        offsets[p] = (offset, shape)
+        offset += shape[0] * shape[1]
+    total_len = offset
+
+    client_vecs = {}
+    for cid in client_ids:
+        tables = all_local_components_map[cid].get('contingency_tables', {})
+        vec = np.zeros(total_len, dtype=float)
+        for p in pairs:
+            off, shape = offsets[p]
+            t = tables.get(p)
+            if t is not None and not t.empty:
+                reindexed = t.reindex(index=row_labels[p], columns=col_labels[p], fill_value=0.0)
+                vec[off: off + shape[0] * shape[1]] = reindexed.to_numpy(dtype=float).ravel()
+        client_vecs[cid] = vec
+
+    return {'pairs': pairs, 'offsets': offsets, 'total_len': total_len, 'client_vecs': client_vecs}
+
+
+def fast_state_vector(fast_state, client_ids):
+    """Sum of client vectors for client_ids -- used for the initial state and periodic resync."""
+    vec = np.zeros(fast_state['total_len'], dtype=float)
+    for cid in client_ids:
+        vec += fast_state['client_vecs'][cid]
+    return vec
+
+
+def _mi_from_counts_np(counts_2d):
+    """Numpy port of calculate_global_mi's core math for one pair's counts array."""
+    total = counts_2d.sum()
+    if total < 1e-9:
+        return 0.0
+    p_xy = counts_2d / total
+    p_x = p_xy.sum(axis=1)
+    p_y = p_xy.sum(axis=0)
+    x_mask = p_x > 1e-12
+    y_mask = p_y > 1e-12
+    if not x_mask.any() or not y_mask.any():
+        return 0.0
+    p_xy = p_xy[np.ix_(x_mask, y_mask)]
+    p_x = p_x[x_mask]
+    p_y = p_y[y_mask]
+    outer = np.outer(p_x, p_y)
+    valid = (p_xy > 1e-12) & (outer > 1e-12)
+    if not valid.any():
+        return 0.0
+    ratio = p_xy[valid] / outer[valid]
+    pos = ratio > 1e-12
+    if not pos.any():
+        return 0.0
+    mi = float(np.sum(p_xy[valid][pos] * np.log2(ratio[pos])))
+    return 0.0 if abs(mi) < 1e-12 else mi
+
+
+def fast_calculate_loss(fast_state, agg_vec, ideal_targets, weights, sensitive_var, non_sensitive_vars):
+    """Numpy-vector mirror of calculate_loss, for use inside the SA hot loop only."""
+    all_relevant_vars, _ = _relevant_pairs(sensitive_var, non_sensitive_vars)
+    valid_non_sensitive = set(non_sensitive_vars)
+    offsets = fast_state['offsets']
+
+    loss = 0.0
+    for i, var1 in enumerate(all_relevant_vars):
+        for var2 in all_relevant_vars[i + 1:]:
+            pair = tuple(sorted((var1, var2)))
+            off, shape = offsets[pair]
+            counts_2d = agg_vec[off: off + shape[0] * shape[1]].reshape(shape)
+            mi_value = _mi_from_counts_np(counts_2d)
+
+            if var1 == sensitive_var or var2 == sensitive_var:
+                other_var = var2 if var1 == sensitive_var else var1
+                if other_var == 'label':
+                    target = ideal_targets.get('target_IST', 0.0)
+                    weight = weights.get('alpha_ST', 1.0)
+                    loss += weight * (mi_value - target)
+                elif other_var in valid_non_sensitive:
+                    target = ideal_targets.get('target_ISN', 0.0)
+                    weight = weights.get('alpha_SN', 1.0)
+                    loss += weight * (mi_value - target)
+            elif var1 == 'label' or var2 == 'label':
+                other_var = var2 if var1 == 'label' else var1
+                if other_var in valid_non_sensitive:
+                    weight = weights.get('delta_NT', 1.0)
+                    loss -= weight * mi_value
+            elif var1 in valid_non_sensitive and var2 in valid_non_sensitive:
+                target = ideal_targets.get('target_INN', 0.0)
+                weight = weights.get('beta_NN', 0.1)
+                loss += weight * (mi_value - target)
+
+    return loss
+
 
 def greedy_additive_selection(all_local_components_map, # Dict: {client_id: components}
                               ideal_targets,
@@ -333,7 +478,9 @@ def simulated_annealing_selection(
     cooling_rate=0.95,          # Multiplicative cooling factor (e.g., 0.95 - 0.999)
     min_temp=1e-4,              # Stopping temperature
     max_iterations=2500,        # Max total iterations safeguard
-    iterations_per_temp=20      # Iterations before cooling (lowering worse neighbor accpetance probability)
+    iterations_per_temp=20,     # Iterations before cooling (lowering worse neighbor accpetance probability)
+    resync_interval=100         # Recompute current_agg_comps from scratch every N accepted
+                                 # steps, to bound float drift from incremental delta updates
 ):
     """
     Selects k_max clients using Simulated Annealing to minimize PFL.
@@ -400,14 +547,24 @@ def simulated_annealing_selection(
          print("Error: PFL calculation failed for initial state. Cannot start SA.")
          return [], {}, float('inf')
 
-    # Initialize best state found so far
+    # Initialize best state found so far (best_agg_comps is only reconstructed
+    # once, from best_selection_ids, after the loop -- see below)
     best_selection_ids = current_selection_ids.copy()
     best_loss = current_loss
-    best_agg_comps = current_agg_comps
 
     print(f" Initial state (k={k_max}): Loss={current_loss:.6f}, N={current_n}")
 
-    # --- 2. Simulated Annealing Loop ---
+    # --- 2. Simulated Annealing Loop (numpy fast path) ---
+    # calculate_loss/aggregate_mi_components cost ~70us/pair of pandas index-
+    # alignment overhead, dominant at this loop's scale. The hot loop below
+    # runs on a flat numpy vector per client instead (see build_fast_sa_state
+    # in this module); the public pandas-based aggregated_components format
+    # is reconstructed once at the end, so nothing outside this loop observes
+    # the faster representation.
+    fast_state = build_fast_sa_state(all_local_components_map, all_client_ids, sensitive_var, non_sensitive_vars)
+    client_n = {cid: all_local_components_map[cid].get('N', 0) for cid in all_client_ids}
+    current_vec = fast_state_vector(fast_state, current_selection_ids)
+
     T = initial_temp
     iteration = 0
     steps_at_temp = 0
@@ -428,10 +585,10 @@ def simulated_annealing_selection(
         client_to_add = random.choice(ids_out)
 
         neighbor_selection_ids = (current_selection_ids - {client_to_remove}) | {client_to_add}
-        # Re-aggregate components for the neighbor set
-        neighbor_components_list = [all_local_components_map[cid] for cid in neighbor_selection_ids]
-        neighbor_agg_comps = aggregate_mi_components(neighbor_components_list)
-        neighbor_n = neighbor_agg_comps.get('N', 0)
+        # Neighbor shares k_max-1 clients with the current state, so update the
+        # running aggregate incrementally instead of re-summing every client.
+        neighbor_vec = current_vec - fast_state['client_vecs'][client_to_remove] + fast_state['client_vecs'][client_to_add]
+        neighbor_n = current_n - client_n[client_to_remove] + client_n[client_to_add]
 
         # --- Evaluate Neighbor ---
         if n_min is not None and neighbor_n < n_min:
@@ -439,7 +596,7 @@ def simulated_annealing_selection(
             accept = False # Reject neighbor if it violates constraint
             neighbor_loss = float('inf') # Assign high loss
         else:
-            neighbor_loss = calculate_loss(neighbor_agg_comps, ideal_targets, weights, sensitive_var, non_sensitive_vars)
+            neighbor_loss = fast_calculate_loss(fast_state, neighbor_vec, ideal_targets, weights, sensitive_var, non_sensitive_vars)
         print(f"\nTrying (add/remove)={client_to_remove}/{client_to_add} | PFL(neighbor)={neighbor_loss} | PFL(current)={current_loss}")
         # --- Acceptance Criterion ---
         accept = False
@@ -461,15 +618,21 @@ def simulated_annealing_selection(
             print(f" Iter {iteration}, T={T:.4f}: Accepted neighbor (Loss: {neighbor_loss:.6f}) current federation {neighbor_selection_ids}") # Verbose
             current_selection_ids = neighbor_selection_ids
             current_loss = neighbor_loss
-            current_agg_comps = neighbor_agg_comps
-            # current_components_list is implicitly defined by current_selection_ids now
+            current_vec = neighbor_vec
+            current_n = neighbor_n
+
+            # Periodically recompute from scratch to bound floating-point drift
+            # accumulated from many incremental delta updates.
+            if resync_interval and iteration % resync_interval == 0:
+                current_vec = fast_state_vector(fast_state, current_selection_ids)
+                current_n = sum(client_n[cid] for cid in current_selection_ids)
+                current_loss = fast_calculate_loss(fast_state, current_vec, ideal_targets, weights, sensitive_var, non_sensitive_vars)
 
             # Update best found so far
             if current_loss < best_loss:
                 # print(f"  * New best found: Loss={current_loss:.6f}") # Verbose
                 best_selection_ids = current_selection_ids.copy()
                 best_loss = current_loss
-                best_agg_comps = current_agg_comps
         else:
             print(f" Iter {iteration}, T={T:.4f}: Rejected neighbor (Loss: {neighbor_loss:.6f})") # Verbose
 
@@ -481,6 +644,12 @@ def simulated_annealing_selection(
             # print(f" Cooling T to {T:.4f}") # Verbose
 
     # --- End Loop ---
+    # Reconstruct the public pandas-based aggregated_components for the best
+    # solution found, once, via the original (unmodified) aggregate_mi_components
+    # -- this is the only point where the fast numpy representation is
+    # translated back, so callers see exactly the same return format as before.
+    best_agg_comps = aggregate_mi_components([all_local_components_map[cid] for cid in best_selection_ids])
+
     sa_end_time = time.time()
     print(f"\nSimulated Annealing finished after {iteration} iterations.")
     print(f"Total time: {sa_end_time - sa_start_time:.2f} seconds.")

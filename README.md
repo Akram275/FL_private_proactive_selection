@@ -30,23 +30,39 @@ The project has three main components:
 ├── optimization.py             # Simulated annealing + greedy selection
 ├── reporting.py                # Result formatting
 │
-├── FolkTables_FL.py            # FL training loop (FedAvg)
-├── acs_preprocessing.py        # ACS feature encoding and scaling
-├── pfl_from_dataframe.py       # FL data partitioning helpers
-├── fl_aggregation.py           # Server-side aggregation methods
-├── client_selection.py         # Per-round client selection policies
+├── FL_training/
+│   ├── FolkTables_FL.py        # FL training loop (FedAvg)
+│   ├── acs_preprocessing.py    # ACS feature encoding and scaling
+│   ├── pfl_from_dataframe.py   # FL data partitioning helpers
+│   ├── fl_aggregation.py       # Server-side aggregation methods
+│   └── client_selection.py     # Per-round client selection policies
 │
-├── dp_contingency_audit.py     # Standalone DP privacy audit (LRT)
+├── optimization/
+│   ├── dp_contingency_audit.py     # Standalone DP privacy audit (LRT)
+│   ├── examples_optimal_federation.py
+│   ├── extract_best_federations.py
+│   ├── optimize_pfl_weights.py     # PFL weight calibration (meta-optimization)
+│   └── pfl_validation_experiment.py
+│
+├── visualization/
+│   ├── plot_from_csv.py
+│   ├── plot_pfl_validation.py
+│   └── test_plot_usa_states.py (+ US state shapefile)
+│
+├── archive/                    # Superseded/exploratory scripts, not maintained
 │
 └── requirements.txt
 ```
+
+(`run_optimal_federation.py`, `task_config.py`, `mi_utils.py`, `optimization.py`,
+`reporting.py` remain at the repo root, imported directly by the scripts above.)
 
 ---
 
 ## Setup
 
 ```bash
-git clone https://github.com/Akram275/FL_private_proactive_selection.git
+git clone <this-repository-url>
 cd FL_private_proactive_selection
 pip install -r requirements.txt
 ```
