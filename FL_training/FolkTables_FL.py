@@ -3,6 +3,7 @@ import pandas as pd
 import csv
 import random
 import argparse
+import gc
 from pathlib import Path
 from folktables import ACSDataSource, ACSEmployment, ACSIncome, ACSPublicCoverage, ACSMobility, ACSTravelTime
 from tensorflow import keras
@@ -383,6 +384,21 @@ def run_training(task, datasets, epochs, max_iterations, centralized_test,
 
         if n_iterations == max_iterations:
             break
+
+        # Every round creates a fresh Keras Model per client (clone_model) plus
+        # a fresh global model (aggregate()), none of which Keras releases on
+        # its own -- over many rounds x many clients this accumulates enough
+        # to OOM (observed 9+GB from a single run_exp call at k=15). The only
+        # state that must survive a session reset is the global model's
+        # weights (plain numpy, independent of the TF graph); every other
+        # aggregator's persisted state (FedAdam's m/v, SCAFFOLD's control
+        # variates, FedProx's mu) is already plain numpy/Python, unaffected by
+        # clear_session. Snapshot, clear, rebuild, restore.
+        global_weights_snapshot = aggregator.global_model.get_weights()
+        tf.keras.backend.clear_session()
+        gc.collect()
+        aggregator.global_model = aggregator.model_fn(aggregator.input_shape, 'zeros')
+        aggregator.global_model.set_weights(global_weights_snapshot)
     return scores
 
 
