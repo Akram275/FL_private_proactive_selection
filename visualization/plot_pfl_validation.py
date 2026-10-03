@@ -24,6 +24,7 @@ from pathlib import Path
 from datetime import datetime
 from scipy import stats
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import seaborn as sns
 from tqdm import tqdm
 
@@ -124,46 +125,59 @@ def compute_all_correlations(x, y):
     }
 
 
-def plot_scatter_with_correlation(ax, x, y, xerr=None, yerr=None, 
+def plot_scatter_with_correlation(ax, x, y, xerr=None, yerr=None,
                                    xlabel='PFL', ylabel='Metric',
                                    title='', color='steelblue',
-                                   show_regression=True):
+                                   show_regression=True,
+                                   label_fontsize=22, tick_fontsize=22,
+                                   corr_fontsize=22, marker_size=40, n_ticks=4):
     """
     Create scatter plot with correlation line and statistics.
     """
     # Scatter points with error bars
     if yerr is not None:
-        ax.errorbar(x, y, yerr=yerr, fmt='o', color=color, 
-                    alpha=0.7, markersize=8, capsize=3, elinewidth=1)
+        ax.errorbar(x, y, yerr=yerr, fmt='o', color=color,
+                    alpha=0.7, markersize=6, capsize=2, elinewidth=1)
     else:
-        ax.scatter(x, y, c=color, alpha=0.7, s=60, edgecolors='white', linewidth=0.5)
-    
+        ax.scatter(x, y, c=color, alpha=0.7, s=marker_size, edgecolors='white', linewidth=0.5)
+
     # Compute correlations
     corr = compute_all_correlations(x, y)
-    
+
     if show_regression:
         # Linear regression line
         x_line = np.linspace(min(x), max(x), 100)
         y_line = corr['slope'] * x_line + corr['intercept']
-        ax.plot(x_line, y_line, '--', color='red', linewidth=2)
-    
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+        ax.plot(x_line, y_line, '--', color='red', linewidth=1.5)
+
+    ax.set_xlabel(xlabel, fontsize=label_fontsize)
+    ax.set_ylabel(ylabel, fontsize=label_fontsize)
     ax.set_title(title)
-    
+
     # Make plot borders (spines) more bold
     for spine in ax.spines.values():
-        spine.set_linewidth(2)
-    
+        spine.set_linewidth(1.5)
+
     # Make tick marks bolder
-    ax.tick_params(axis='both', width=2, length=6)
-    
-    # Add text box with statistics (Spearman only)
+    ax.tick_params(axis='both', width=1.5, length=5, labelsize=tick_fontsize)
+
+    # Fewer ticks so larger tick labels don't collide with each other
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=n_ticks))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=n_ticks))
+
+    # Add text box with statistics (Spearman only). Anchor it in whichever
+    # top corner is emptiest given the trend direction, so the larger label
+    # doesn't sit on top of the point cluster (e.g. negative correlations
+    # cluster points near the top-left).
     textstr = f"ρ = {corr['spearman_rho']:.3f}"
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=20,
-            verticalalignment='top', bbox=props)
-    
+    if corr['spearman_rho'] < 0:
+        text_x, ha = 0.95, 'right'
+    else:
+        text_x, ha = 0.05, 'left'
+    ax.text(text_x, 0.95, textstr, transform=ax.transAxes, fontsize=corr_fontsize,
+            verticalalignment='top', horizontalalignment=ha, bbox=props)
+
     return corr
 
 
@@ -172,20 +186,25 @@ def create_validation_plots(results_df: pd.DataFrame, output_dir: Path,
     """
     Create 2x2 scatter plots of metrics vs PFL.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    
+    # Single wide row instead of a near-square 2x2 grid: same content, same
+    # per-panel readability, but ~3x less vertical space at a given print
+    # width (a 2x2 at 14x12in is nearly square; a 1x4 row is a short, wide
+    # strip -- most figure placements in the paper scale to a fixed column
+    # width, so height is what actually shrinks).
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4.3))
+
     pfl = results_df['pfl'].values
-    
+
     # Infer task and k from data if not provided
     if task is None:
         task = "Unknown"
     if k is None and 'k' in results_df.columns:
         k = results_df['k'].iloc[0]
-    
+
     correlations = {}
-    
+
     # Plot 1: F1 vs PFL (expect negative correlation - higher PFL = worse performance)
-    ax1 = axes[0, 0]
+    ax1 = axes[0]
     f1 = results_df['f1_mean'].values
     f1_err = results_df['f1_std'].values if 'f1_std' in results_df.columns else None
     corr_f1 = plot_scatter_with_correlation(
@@ -195,9 +214,9 @@ def create_validation_plots(results_df: pd.DataFrame, output_dir: Path,
         color='black'
     )
     correlations['f1'] = corr_f1
-    
+
     # Plot 2: Accuracy vs PFL (expect negative correlation)
-    ax2 = axes[0, 1]
+    ax2 = axes[1]
     acc = results_df['accuracy_mean'].values
     acc_err = results_df['accuracy_std'].values if 'accuracy_std' in results_df.columns else None
     corr_acc = plot_scatter_with_correlation(
@@ -207,9 +226,9 @@ def create_validation_plots(results_df: pd.DataFrame, output_dir: Path,
         color='black'
     )
     correlations['accuracy'] = corr_acc
-    
+
     # Plot 3: EOD vs PFL (expect positive correlation)
-    ax3 = axes[1, 0]
+    ax3 = axes[2]
     eod = results_df['eod_mean'].values
     eod_err = results_df['eod_std'].values if 'eod_std' in results_df.columns else None
     corr_eod = plot_scatter_with_correlation(
@@ -219,9 +238,9 @@ def create_validation_plots(results_df: pd.DataFrame, output_dir: Path,
         color='black'
     )
     correlations['eod'] = corr_eod
-    
+
     # Plot 4: MAD vs PFL (expect positive correlation)
-    ax4 = axes[1, 1]
+    ax4 = axes[3]
     mad = results_df['mad_mean'].values
     mad_err = results_df['mad_std'].values if 'mad_std' in results_df.columns else None
     corr_mad = plot_scatter_with_correlation(
@@ -231,15 +250,15 @@ def create_validation_plots(results_df: pd.DataFrame, output_dir: Path,
         color='black'
     )
     correlations['mad'] = corr_mad
-    
+
     plt.tight_layout()
-    
+
     plot_path = output_dir / 'scatter_plots.png'
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"Saved scatter plots to {plot_path}")
-    
-    plt.show()
-    
+
+    plt.close(fig)
+
     return correlations
 
 

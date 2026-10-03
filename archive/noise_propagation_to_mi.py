@@ -123,7 +123,12 @@ for sigma in noise_levels:
     print(f"SNR = {snr:.2f} (σ={sigma:.1f}): Mean bias = {bias.mean():.4f}, Std of bias = {np.std(bias):.4f}")
 
 # Box plot: Bias across different SNRs
-fig, ax = plt.subplots(figsize=(12, 10))
+# Short, wide aspect (was 12x10, nearly square) instead of tall/square: at a
+# fixed print width this cuts the printed height roughly in half, with the
+# same absolute font sizes reading comparatively larger. The old fontsize=35
+# legend for a single entry also dwarfed the plot -- shrunk to something
+# proportionate.
+fig, ax = plt.subplots(figsize=(12, 5))
 bp1 = ax.boxplot(errors_data, labels=[f"{snr:.0e}".replace('e+0', 'e+').replace('e-0', 'e-') for snr in snr_values], patch_artist=True)
 for patch in bp1['boxes']:
     patch.set_facecolor('steelblue')
@@ -136,11 +141,11 @@ ax.axhline(y=0, color='green', linestyle='--', linewidth=2, label='No Bias')
 ax.set_xlabel('Signal-to-Noise Ratio (SNR)', fontsize=22, fontweight='bold')
 ax.set_ylabel('MI Estimation Error', fontsize=22, fontweight='bold')
 ax.grid(True, alpha=0.3, axis='y')
-ax.legend(fontsize=35, loc='upper right')
+ax.legend(fontsize=18, loc='upper right')
 
-plt.subplots_adjust(left=0.12, right=0.95, top=0.90, bottom=0.12)
+plt.subplots_adjust(left=0.1, right=0.97, top=0.95, bottom=0.2)
 plt.savefig('mi_error_boxplot_snr.png', dpi=300, bbox_inches='tight')
-plt.show()
+plt.close(fig)
 
 # Standard deviation of error vs SNR (separate figure)
 fig, ax = plt.subplots(figsize=(12, 5))

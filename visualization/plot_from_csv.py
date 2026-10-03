@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm
-from matplotlib.ticker import FormatStrFormatter
+from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 import traceback
 import csv
 
@@ -42,6 +42,27 @@ measure_mapping = {
     'spd': 5,
     'mad': 6,
     'f1': -1
+}
+
+
+def compute_metric_stats(scores_np, measure):
+    """Compute mean and std for a given measure. Handles 'f1' from precision/recall."""
+    if measure == 'f1':
+        precision = scores_np[..., measure_mapping['precision']]
+        recall = scores_np[..., measure_mapping['recall']]
+        data = 2 * (precision * recall) / np.maximum(precision + recall, 1e-8)
+    else:
+        data = scores_np[..., measure_mapping[measure]]
+    return np.mean(data, axis=0), np.std(data, axis=0)
+
+
+YLABEL_MAP = {
+    'loss': 'CE Loss',
+    'accuracy': 'Bal. Accuracy',
+    'f1': 'F1 Score',
+    'spd': 'SPD',
+    'eod': 'EOD',
+    'mad': 'MAD'
 }
 
 
@@ -213,12 +234,15 @@ def plot_utility_and_fairness_subplots(
     savepath=None,
     utility_metrics=None,
     fairness_metrics=None,
+    label_fontsize=32,
+    tick_fontsize=28,
+    legend_fontsize=26,
 ):
     """
     Plots two rows of subplots:
     - Row 1 (Utility): two user-selected utility metrics
     - Row 2 (Fairness): two user-selected fairness metrics
-    
+
     Each subplot shows mean +/- std dev for all groups.
 
     Args:
@@ -271,19 +295,9 @@ def plot_utility_and_fairness_subplots(
         return
     
     # Create 2x2 subplot figure
-    fig, axes = plt.subplots(2, 2, figsize=(8, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
     iterations = np.arange(num_iterations)
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    
-    def compute_metric_stats(scores_np, measure):
-        """Compute mean and std for a given measure."""
-        if measure == 'f1':
-            precision = scores_np[..., measure_mapping['precision']]
-            recall = scores_np[..., measure_mapping['recall']]
-            data = 2 * (precision * recall) / np.maximum(precision + recall, 1e-8)
-        else:
-            data = scores_np[..., measure_mapping[measure]]
-        return np.mean(data, axis=0), np.std(data, axis=0)
     
     def plot_single_metric(ax, measure, ylabel):
         """Plot a single metric on the given axes for all groups."""
@@ -292,44 +306,110 @@ def plot_utility_and_fairness_subplots(
             ax.plot(iterations, mean, label=label, color=colors[i], linewidth=2, markersize=4)
             ax.fill_between(iterations, mean - std, mean + std, color=colors[i], alpha=0.2)
         
-        ax.set_ylabel(ylabel, fontsize=14)
+        ax.set_ylabel(ylabel, fontsize=label_fontsize)
         ax.grid(True, linestyle='--', alpha=0.6)
-        ax.tick_params(axis='both', which='major', labelsize=14)
+        ax.tick_params(axis='both', which='major', labelsize=tick_fontsize)
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
     
     # Plot utility metrics (first row)
-    ylabel_map = {
-        'loss': 'CE Loss', 
-        'accuracy': 'Bal. Accuracy', 
-        'f1': 'F1 Score',
-        'spd': 'SPD', 
-        'eod': 'EOD', 
-        'mad': 'MAD'
-    }
-    
     for i, measure in enumerate(utility_metrics):
-        plot_single_metric(axes[0, i], measure, ylabel_map[measure])
-    
+        plot_single_metric(axes[0, i], measure, YLABEL_MAP[measure])
+
     # Plot fairness metrics (second row)
     for i, measure in enumerate(fairness_metrics):
-        plot_single_metric(axes[1, i], measure, ylabel_map[measure])
+        plot_single_metric(axes[1, i], measure, YLABEL_MAP[measure])
     
     # Add shared x-axis label to bottom row
     for ax in axes[1, :]:
-        ax.set_xlabel('Rounds', fontsize=14)
-    
+        ax.set_xlabel('Rounds', fontsize=label_fontsize)
+
     # Add legend outside figures, at the top center
     handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels, loc='upper center', ncol=len(labels), fontsize=11, 
-               bbox_to_anchor=(0.5, 1.02), frameon=False)
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Leave space at top for legend
+    fig.legend(handles, legend_labels, loc='upper center', ncol=2, fontsize=legend_fontsize,
+               bbox_to_anchor=(0.5, 1.08), frameon=False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.80])  # Leave space at top for the 2-row legend
     
     if savepath:
         plt.savefig(savepath, dpi=150, bbox_inches='tight')
         print(f"Figure saved to {savepath}")
     else:
         plt.show()
+
+def plot_joint_tasks_subplots(
+    tasks_scores,       # dict: task_name -> list of score arrays, one per label (aligned with `labels`)
+    labels,
+    savepath,
+    utility_metrics=None,
+    fairness_metrics=None,
+    label_fontsize=26,
+    tick_fontsize=22,
+    legend_fontsize=24,
+    title_fontsize=26,
+):
+    """
+    Joint figure spanning several tasks with a single shared legend, instead
+    of repeating the same legend/labels once per task. Rows are metrics
+    (utility_metrics then fairness_metrics), columns are tasks.
+
+    Args:
+        tasks_scores: dict mapping task display name -> scores_list, where
+            scores_list is the same per-label list of (num_runs,
+            num_iterations, num_metrics) arrays used by
+            plot_utility_and_fairness_subplots.
+        labels: list of labels for each group, aligned with each task's scores_list.
+    """
+    if utility_metrics is None:
+        utility_metrics = ['loss', 'accuracy']
+    if fairness_metrics is None:
+        fairness_metrics = ['spd', 'mad']
+    metrics = list(utility_metrics) + list(fairness_metrics)
+
+    task_names = list(tasks_scores.keys())
+    n_tasks = len(task_names)
+    n_rows = len(metrics)
+
+    fig, axes = plt.subplots(n_rows, n_tasks, figsize=(4.8 * n_tasks, 3.4 * n_rows), squeeze=False)
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    for col, task_name in enumerate(task_names):
+        scores_np_list = [np.array(s, dtype=float) for s in tasks_scores[task_name]]
+        num_iterations = min(s.shape[1] for s in scores_np_list)
+        scores_np_list = [s[:, :num_iterations, :] for s in scores_np_list]
+        iterations = np.arange(num_iterations)
+
+        for row, measure in enumerate(metrics):
+            ax = axes[row, col]
+            for i, (scores_np, label) in enumerate(zip(scores_np_list, labels)):
+                mean, std = compute_metric_stats(scores_np, measure)
+                ax.plot(iterations, mean, label=label, color=colors[i], linewidth=2)
+                ax.fill_between(iterations, mean - std, mean + std, color=colors[i], alpha=0.2)
+
+            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.tick_params(axis='both', which='major', labelsize=tick_fontsize)
+            ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+            if col == 0:
+                ax.set_ylabel(YLABEL_MAP[measure], fontsize=label_fontsize)
+            if row == 0:
+                ax.set_title(task_name, fontsize=title_fontsize, fontweight='bold')
+            if row == n_rows - 1:
+                ax.set_xlabel('Rounds', fontsize=label_fontsize)
+
+    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc='upper center', ncol=len(labels), fontsize=legend_fontsize,
+               bbox_to_anchor=(0.5, 1.0 + 0.3 / (3.4 * n_rows)), frameon=False)
+
+    plt.tight_layout(rect=[0, 0, 1, 1 - 0.55 / (3.4 * n_rows)])
+
+    plt.savefig(savepath, dpi=150, bbox_inches='tight')
+    print(f"Figure saved to {savepath}")
+    plt.close(fig)
+
 
 # Modified Function
 def plot_measure_evolution_with_individual_runs(

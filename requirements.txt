@@ -13,3 +13,6 @@ tensorflow>=2.13
 
 # Optimisation / stats (used in optimization.py)
 # scipy already listed above
+
+# Optimal transport (FedBary baseline)
+POT>=0.9

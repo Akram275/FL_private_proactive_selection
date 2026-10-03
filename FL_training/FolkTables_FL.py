@@ -4,6 +4,8 @@ import csv
 import random
 import argparse
 import gc
+import os
+import pickle
 from pathlib import Path
 from folktables import ACSDataSource, ACSEmployment, ACSIncome, ACSPublicCoverage, ACSMobility, ACSTravelTime
 from tensorflow import keras
@@ -219,9 +221,9 @@ def SPD(model, x_test) :
     return (np.mean(model.predict(x_test[x_test['SEX_1.0']==True].to_numpy().astype('float'))) - np.mean(model.predict(x_test[x_test['SEX_2.0']==True].to_numpy().astype('float'))))
 
 
-def run_training(task, datasets, epochs, max_iterations, centralized_test, 
+def run_training(task, datasets, epochs, max_iterations, centralized_test,
                  aggregation_method='fedavg', agg_kwargs=None,
-                 client_selection='full', selection_kwargs=None):
+                 client_selection='full', selection_kwargs=None, eval_datasets=None):
     """
     Run federated learning training loop.
     
@@ -236,8 +238,13 @@ def run_training(task, datasets, epochs, max_iterations, centralized_test,
         client_selection: Client selection method ('full', 'random', 'ucb', 'threshold', 'power_of_choice')
         selection_kwargs: Additional kwargs for client selector
     """
-    #Sample a test dataset from all clients' datasets to eval the aggregated model at each iteration
-    test_features, test_labels = get_testdata(datasets, 1000)
+    #Sample a test dataset to eval the aggregated model at each iteration. By
+    #default this is drawn only from the training federation's own states
+    #(datasets); pass eval_datasets to evaluate against a different, fixed
+    #population instead (e.g. all 50 states, independent of which states
+    #were selected for training) -- each state's data is still preprocessed
+    #with its own locally-fit scaler, same convention as the training data.
+    test_features, test_labels = get_testdata(eval_datasets if eval_datasets is not None else datasets, 1000)
 
     n_iterations = 0
     n_clients = len(datasets)
@@ -403,9 +410,24 @@ def run_training(task, datasets, epochs, max_iterations, centralized_test,
 
 
 
+def build_state_datasets(task, states):
+    """Download + locally preprocess a list of states into the (features,
+    labels) per-client format used by run_training. Each state independently
+    fits its own scaler, matching how federation training data is built."""
+    task_obj = TASK_OBJECTS[task]
+    data_source = ACSDataSource(survey_year='2018', horizon='1-Year', survey='person')
+    datasets = []
+    for state in states:
+        acs_data = data_source.get_data(states=[state], download=True)
+        features, labels, _ = task_obj.df_to_pandas(acs_data)
+        datasets.append([preprocess_acs_data(features, verbose=False), labels])
+    return datasets
+
+
 def run_exp(task, states, epochs=1, max_iterations=50, centralized_test=False,
             aggregation_method='fedavg', agg_kwargs=None,
-            client_selection='full', selection_kwargs=None):
+            client_selection='full', selection_kwargs=None,
+            global_eval_states=None, global_eval_cache=None):
     """Run federated learning experiment for a given task and states.
     
     Args:
@@ -418,33 +440,61 @@ def run_exp(task, states, epochs=1, max_iterations=50, centralized_test=False,
         agg_kwargs: Additional kwargs for aggregator
         client_selection: Client selection method ('full', 'random', 'ucb', 'threshold', 'power_of_choice')
         selection_kwargs: Additional kwargs for client selector
-    
+        global_eval_states: If given, evaluate the trained model each round against
+            this fixed set of states instead of the training federation's own states
+            (e.g. all 50 states, to measure generalization to the full population
+            regardless of which states were selected for training).
+        global_eval_cache: Optional path to a pickle file caching the preprocessed
+            global_eval_states datasets, so repeated runs (different configs, same
+            task) don't re-download/re-preprocess all 50 states every time.
+
     Returns:
         List of scores per iteration
     """
     if task not in TASK_OBJECTS:
         raise ValueError(f"Unknown task: {task}. Available: {list(TASK_OBJECTS.keys())}")
-    
-    task_obj = TASK_OBJECTS[task]
-    data_source = ACSDataSource(survey_year='2018', horizon='1-Year', survey='person')
-    datasets = []
 
-    for state in states:
-        print('Client simulates '+state+' ACS data')
-        acs_data = data_source.get_data(states=[state], download=True)
-        features, labels, _ = task_obj.df_to_pandas(acs_data)  # Third value is group
-        datasets.append([preprocess_acs_data(features), labels])
-        print('dataset size : ', datasets[-1][0].shape[0])
+    print(f'Building federation datasets for states: {states}')
+    datasets = build_state_datasets(task, states)
+    for state, ds in zip(states, datasets):
+        print(f'Client simulates {state} ACS data, dataset size: {ds[0].shape[0]}')
+
+    eval_datasets = None
+    if global_eval_states is not None:
+        if global_eval_cache and os.path.exists(global_eval_cache):
+            print(f'Loading cached global eval datasets from {global_eval_cache}')
+            with open(global_eval_cache, 'rb') as f:
+                eval_datasets = pickle.load(f)
+        else:
+            print(f'Building global eval datasets for {len(global_eval_states)} states...')
+            eval_datasets = build_state_datasets(task, global_eval_states)
+            if global_eval_cache:
+                os.makedirs(os.path.dirname(global_eval_cache), exist_ok=True)
+                with open(global_eval_cache, 'wb') as f:
+                    pickle.dump(eval_datasets, f)
+                print(f'Cached global eval datasets to {global_eval_cache}')
+
+        # preprocess_acs_data's one-hot column order is derived from Python
+        # set operations, which are NOT guaranteed to produce the same
+        # column order across independently-built DataFrames (confirmed:
+        # same 75 columns, different order, between a 5-state federation and
+        # a 50-state eval set). The model only sees .to_numpy() arrays with
+        # no column names, so any order mismatch silently scrambles every
+        # one-hot feature. Force eval_datasets to match the training
+        # federation's exact column order before anything touches the model.
+        train_columns = datasets[0][0].columns.tolist()
+        eval_datasets = [[features[train_columns], labels] for features, labels in eval_datasets]
 
     scores = run_training(
-        task, datasets, 
-        epochs=epochs, 
-        max_iterations=max_iterations, 
+        task, datasets,
+        epochs=epochs,
+        max_iterations=max_iterations,
         centralized_test=centralized_test,
         aggregation_method=aggregation_method,
         agg_kwargs=agg_kwargs,
         client_selection=client_selection,
-        selection_kwargs=selection_kwargs
+        selection_kwargs=selection_kwargs,
+        eval_datasets=eval_datasets
     )
     return scores
 
@@ -463,7 +513,8 @@ def share_more_than_half(list1, list2):
 
 def run_comparison_experiment(task, k, federations, output_dir='Convergence2', n_seeds=3, seed_start=0,
                                random_agg='fedavg', agg_kwargs=None, skip_optimal=False, only_optimal=False,
-                               client_selection='full', selection_kwargs=None):
+                               client_selection='full', selection_kwargs=None, optimal_folder_name='Optimal_FedAvg',
+                               global_eval_states=None, global_eval_cache=None):
     """
     Run comparison experiment between optimal and random federations.
     
@@ -505,7 +556,7 @@ def run_comparison_experiment(task, k, federations, output_dir='Convergence2', n
         random_folder = f'Random_{random_agg_name}_{selection_suffix}'
     else:
         random_folder = f'Random_{random_agg_name}'
-    optimal_folder = 'Optimal_FedAvg'
+    optimal_folder = optimal_folder_name
     if not only_optimal:
         (base_path / random_folder).mkdir(parents=True, exist_ok=True)
     if not skip_optimal or only_optimal:
@@ -534,11 +585,13 @@ def run_comparison_experiment(task, k, federations, output_dir='Convergence2', n
             
             # Run random federation with specified aggregation method and client selection
             scores_random.append(run_exp(
-                task, random_states, 
-                aggregation_method=random_agg, 
+                task, random_states,
+                aggregation_method=random_agg,
                 agg_kwargs=agg_kwargs,
                 client_selection=client_selection,
-                selection_kwargs=selection_kwargs.copy() if selection_kwargs else None
+                selection_kwargs=selection_kwargs.copy() if selection_kwargs else None,
+                global_eval_states=global_eval_states,
+                global_eval_cache=global_eval_cache
             ))
             df = pd.DataFrame(scores_random[-1], columns=header)
             df.to_csv(base_path / random_folder / f'seed_{seed}.csv', index=False, header=True)
@@ -551,7 +604,11 @@ def run_comparison_experiment(task, k, federations, output_dir='Convergence2', n
                 writer.writerow([list(optimal_states)])
             
             # Optimal always uses fedavg with full participation (no client selection)
-            scores_optimal.append(run_exp(task, optimal_states, aggregation_method='fedavg'))
+            scores_optimal.append(run_exp(
+                task, optimal_states, aggregation_method='fedavg',
+                global_eval_states=global_eval_states,
+                global_eval_cache=global_eval_cache
+            ))
             df = pd.DataFrame(scores_optimal[-1], columns=header)
             df.to_csv(base_path / optimal_folder / f'seed_{seed}.csv', index=False, header=True)
     
@@ -597,7 +654,18 @@ def main():
                         help='Skip running optimal federation (use existing baseline results)')
     parser.add_argument('--only-optimal', action='store_true',
                         help='Run ONLY optimal federations with FedAvg (skip random federations)')
-    
+    parser.add_argument('--optimal-folder-name', type=str, default='Optimal_FedAvg',
+                        help="Output subfolder name for the --federations-csv federation (e.g. 'FedBary_FedAvg' "
+                             "for a non-Optimal federation-selection baseline read from the same --federations-csv format)")
+    parser.add_argument('--global-test', action='store_true',
+                        help='Evaluate each round against a fixed test set drawn from ALL 50 states, '
+                             'independent of which states were selected for training (measures '
+                             'generalization to the full population rather than just the federation states)')
+    parser.add_argument('--global-eval-cache', type=str, default=None,
+                        help='Path to cache the preprocessed all-50-states eval set (pickle). Speeds up '
+                             'repeated --global-test runs across configs for the same task. Default: '
+                             'results/global_eval_cache_<task>.pkl')
+
     # Client selection arguments
     parser.add_argument('--client-selection', type=str, default='full',
                         choices=get_available_selection_methods(),
@@ -674,6 +742,11 @@ def main():
             k_values = list(federations[task].keys())
         
         for k in k_values:
+            global_eval_states = all_states if args.global_test else None
+            global_eval_cache = None
+            if args.global_test:
+                global_eval_cache = args.global_eval_cache or f'results/global_eval_cache_{task}.pkl'
+
             run_comparison_experiment(
                 task=task,
                 k=k,
@@ -686,7 +759,10 @@ def main():
                 skip_optimal=args.skip_optimal,
                 only_optimal=args.only_optimal,
                 client_selection=args.client_selection,
-                selection_kwargs=selection_kwargs if args.client_selection != 'full' else None
+                selection_kwargs=selection_kwargs if args.client_selection != 'full' else None,
+                optimal_folder_name=args.optimal_folder_name,
+                global_eval_states=global_eval_states,
+                global_eval_cache=global_eval_cache
             )
 
 
